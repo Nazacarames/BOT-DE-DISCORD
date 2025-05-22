@@ -277,14 +277,15 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    const canalNombre = args.join(" ").toLowerCase();
-    if (!canalNombre) {
+    if (args.length < 1) {
       const msg = await message.reply(
-        "❌ Debes especificar el nombre del canal a agregar.",
+        "❌ Uso: `!addpermisos nombre_del_canal`",
       );
       setTimeout(() => msg.delete().catch(() => {}), 10000);
       return;
     }
+
+    const canalNombre = args.join(" ").toLowerCase();
 
     const canal = message.guild.channels.cache.find(
       (c) =>
@@ -299,111 +300,84 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    if (!permisosData[message.guild.id]) permisosData[message.guild.id] = {};
-    permisosData[message.guild.id][canal.id] = canal.name;
-
-    guardarPermisos(permisosData);
-
-    await message.channel.send(
-      `✅ Canal **${canal.name}** agregado al panel de permisos.`,
-    );
+    // Guardar canal para el panel persistente
+    if (!permisosData.canales) permisosData.canales = [];
+    if (!permisosData.canales.includes(canal.id)) {
+      permisosData.canales.push(canal.id);
+      guardarPermisos(permisosData);
+      await message.channel.send(
+        `✅ Canal ${canal.name} agregado al panel de permisos persistente.`,
+      );
+    } else {
+      await message.channel.send(
+        `⚠️ El canal ${canal.name} ya estaba agregado.`,
+      );
+    }
   }
 
   if (command === "permisos") {
-    // Si no hay canal, usamos el canal actual para mostrar botones de canales guardados
-    const user = message.mentions.users.first() || message.author;
-    const guildPermisos = permisosData[message.guild.id];
-    if (!guildPermisos || Object.keys(guildPermisos).length === 0) {
+    // Mostrar panel de canales para gestionar permisos
+    let usuario = message.mentions.users.first() || message.author;
+
+    // Si no hay canales guardados, avisar
+    if (!permisosData.canales || permisosData.canales.length === 0) {
       await message.channel.send(
-        "❌ No hay canales agregados al panel. Usa `!addpermisos nombre_del_canal`",
+        "⚠️ No hay canales agregados al panel persistente. Usa `!addpermisos nombre_del_canal` para agregar.",
       );
       return;
     }
 
-    const rows = [];
-    let row = new ActionRowBuilder();
+    // Crear botones para cada canal
+    const botones = permisosData.canales.map((id) => {
+      const canal = message.guild.channels.cache.get(id);
+      if (!canal) return null;
+      return new ButtonBuilder()
+        .setCustomId(`toggle-${usuario.id}-${canal.id}`)
+        .setLabel(canal.name)
+        .setStyle(ButtonStyle.Primary);
+    }).filter(Boolean);
 
-    let count = 0;
-    for (const [canalId, canalName] of Object.entries(guildPermisos)) {
-      if (count > 4) {
-        rows.push(row);
-        row = new ActionRowBuilder();
-        count = 0;
-      }
-
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId(`ver-${user.id}-${canalId}`)
-          .setLabel(`Dar acceso a ${canalName}`)
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`ocultar-${user.id}-${canalId}`)
-          .setLabel(`Quitar acceso a ${canalName}`)
-          .setStyle(ButtonStyle.Danger),
-      );
-
-      count++;
+    // Dividir botones en filas (máximo 5 por fila)
+    const filas = [];
+    for (let i = 0; i < botones.length; i += 5) {
+      filas.push(new ActionRowBuilder().addComponents(botones.slice(i, i + 5)));
     }
-    if (row.components.length > 0) rows.push(row);
 
-    const embed = new EmbedBuilder()
-      .setTitle(`🔑 Panel de permisos para ${user.tag}`)
-      .setDescription(
-        "Usa los botones para otorgar o quitar acceso a los canales.",
-      )
-      .setColor("Green");
-
-    await message.channel.send({ embeds: [embed], components: rows });
+    await message.channel.send({
+      content: `🔧 Gestiona permisos para ${usuario.tag}. Haz clic en un canal para alternar acceso.`,
+      components: filas,
+    });
   }
 });
 
+// Manejo de interacciones con botones
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isButton()) return;
 
-  // Esperar que el customId sea como: ver-USERID-CANALID o ocultar-USERID-CANALID
   const [accion, userId, canalId] = interaction.customId.split("-");
 
-  if (!["ver", "ocultar"].includes(accion)) {
+  const usuario = await interaction.guild.members.fetch(userId).catch(() => null);
+  const canal = interaction.guild.channels.cache.get(canalId);
+
+  if (!usuario || !canal) {
     await interaction.reply({
-      content: "❌ Acción inválida.",
+      content: "❌ Usuario o canal inválido.",
       ephemeral: true,
     });
     return;
   }
 
-  const guild = interaction.guild;
-  const canal = guild.channels.cache.get(canalId);
-  if (!canal) {
+  if (interaction.user.id !== userId && !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
     await interaction.reply({
-      content: "❌ Canal no encontrado.",
+      content: "🚫 Solo el usuario mencionado o un administrador puede usar estos botones.",
       ephemeral: true,
     });
     return;
   }
 
-  const user = guild.members.cache.get(userId);
-  if (!user) {
-    await interaction.reply({
-      content: "❌ Usuario no encontrado en el servidor.",
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (
-    !canal
-      .permissionsFor(client.user)
-      .has(PermissionsBitField.Flags.ManageChannels)
-  ) {
-    await interaction.reply({
-      content: "🚫 No tengo permisos para modificar ese canal.",
-      ephemeral: true,
-    });
-    return;
-  }
-
-  let permisos = {};
   if (accion === "ver") {
+    // Dar acceso según tipo canal
+    let permisos = {};
     if (canal.type === ChannelType.GuildText) {
       permisos = {
         ViewChannel: true,
@@ -417,29 +391,118 @@ client.on("interactionCreate", async (interaction) => {
         Speak: true,
       };
     }
+    try {
+      await canal.permissionOverwrites.edit(usuario.id, permisos);
+      await interaction.reply({
+        content: `✅ Acceso concedido a ${usuario.user.tag} en ${canal.name}`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      await interaction.reply({
+        content: `❌ Error al otorgar permisos: ${e.message}`,
+        ephemeral: true,
+      });
+    }
   } else if (accion === "ocultar") {
-    permisos = {
-      ViewChannel: false,
-      SendMessages: false,
-      Connect: false,
-      Speak: false,
-    };
-  }
+    // Quitar acceso
+    try {
+      await canal.permissionOverwrites.edit(usuario.id, {
+        ViewChannel: false,
+        SendMessages: false,
+        Connect: false,
+        Speak: false,
+      });
+      await interaction.reply({
+        content: `🚫 Acceso revocado a ${usuario.user.tag} en ${canal.name}`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      await interaction.reply({
+        content: `❌ Error al revocar permisos: ${e.message}`,
+        ephemeral: true,
+      });
+    }
+  } else if (accion === "toggle") {
+    // Toggle acceso: si tiene ViewChannel, quitar; sino dar acceso básico
+    const permisosActuales = canal.permissionOverwrites.cache.get(usuario.id);
+    const tieneAcceso =
+      permisosActuales && permisosActuales.allow.has(PermissionsBitField.Flags.ViewChannel);
 
-  try {
-    await canal.permissionOverwrites.edit(user.id, permisos);
-
+    try {
+      if (tieneAcceso) {
+        await canal.permissionOverwrites.edit(usuario.id, {
+          ViewChannel: false,
+          SendMessages: false,
+          Connect: false,
+          Speak: false,
+        });
+        await interaction.reply({
+          content: `🚫 Acceso revocado a ${usuario.user.tag} en ${canal.name}`,
+          ephemeral: true,
+        });
+      } else {
+        let permisosNuevos = {};
+        if (canal.type === ChannelType.GuildText) {
+          permisosNuevos = {
+            ViewChannel: true,
+            ReadMessageHistory: true,
+            SendMessages: true,
+          };
+        } else if (canal.type === ChannelType.GuildVoice) {
+          permisosNuevos = {
+            ViewChannel: true,
+            Connect: true,
+            Speak: true,
+          };
+        }
+        await canal.permissionOverwrites.edit(usuario.id, permisosNuevos);
+        await interaction.reply({
+          content: `✅ Acceso concedido a ${usuario.user.tag} en ${canal.name}`,
+          ephemeral: true,
+        });
+      }
+    } catch (e) {
+      await interaction.reply({
+        content: `❌ Error al cambiar permisos: ${e.message}`,
+        ephemeral: true,
+      });
+    }
+  } else if (interaction.customId === "crear-ticket") {
+    // Aquí puedes manejar el botón crear ticket (ejemplo básico)
+    await interaction.reply({ content: "🎫 Función de crear ticket aún no implementada.", ephemeral: true });
+  } else if (interaction.customId === "ocultar-canal") {
+    // Ocultar canal para @everyone
+    try {
+      await canal.permissionOverwrites.edit(interaction.guild.roles.everyone, {
+        ViewChannel: false,
+      });
+      await interaction.reply({
+        content: `🙈 Canal ${canal.name} ocultado para todos.`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      await interaction.reply({ content: `❌ Error: ${e.message}`, ephemeral: true });
+    }
+  } else if (interaction.customId === "mostrar-canal") {
+    // Mostrar canal para @everyone
+    try {
+      await canal.permissionOverwrites.edit(interaction.guild.roles.everyone, {
+        ViewChannel: true,
+      });
+      await interaction.reply({
+        content: `👁️ Canal ${canal.name} mostrado para todos.`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      await interaction.reply({ content: `❌ Error: ${e.message}`, ephemeral: true });
+    }
+  } else {
     await interaction.reply({
-      content: `✅ Permisos actualizados para ${user.user.tag} en #${canal.name}.`,
-      ephemeral: true,
-    });
-  } catch (error) {
-    console.error("Error modificando permisos:", error);
-    await interaction.reply({
-      content: "❌ Error al modificar los permisos.",
+      content: "❌ Acción no reconocida.",
       ephemeral: true,
     });
   }
 });
 
 client.login(token);
+
